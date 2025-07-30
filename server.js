@@ -1,36 +1,35 @@
 const Fastify = require("fastify");
 const fastifyWebsocket = require("@fastify/websocket");
 const WebSocket = require("ws");
-const dotenv = require("dotenv");
-dotenv.config();
-
-const VAPI_API_KEY = process.env.VAPI_API_KEY;
-const VAPI_ASSISTANT_ID = process.env.VAPI_ASSISTANT_ID;
+require("dotenv").config();
 
 const fastify = Fastify();
+
 fastify.register(fastifyWebsocket);
 
-// μ-law to PCM 16-bit
+// μ-law to PCM 16-bit conversion
 function ulawToPcm16(buffer) {
   const MULAW_BIAS = 33;
   const pcmSamples = new Int16Array(buffer.length);
+
   for (let i = 0; i < buffer.length; i++) {
     let muLawByte = buffer[i] ^ 0xff;
     let sign = muLawByte & 0x80;
     let exponent = (muLawByte >> 4) & 0x07;
     let mantissa = muLawByte & 0x0f;
-    let sample = ((mantissa << 4) + 8) << (exponent + 3);
+    let sample = ((mantissa << 4) + 0x08) << (exponent + 3);
     sample = sign ? MULAW_BIAS - sample : sample - MULAW_BIAS;
     pcmSamples[i] = sample;
   }
+
   return Buffer.from(pcmSamples.buffer);
 }
 
-// PCM to μ-law
+// PCM 16-bit to μ-law conversion
 function pcm16ToUlaw(buffer) {
+  const pcmSamples = new Int16Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 2);
+  const MULAW_MAX = 0x1fff;
   const MULAW_BIAS = 33;
-  const MULAW_MAX = 0x1FFF;
-  const pcmSamples = new Int16Array(buffer.buffer, buffer.byteOffset, buffer.length / 2);
   const ulawBuffer = Buffer.alloc(pcmSamples.length);
 
   for (let i = 0; i < pcmSamples.length; i++) {
@@ -53,59 +52,64 @@ function pcm16ToUlaw(buffer) {
   return ulawBuffer;
 }
 
+// WebSocket bridge logic
 fastify.get("/ws", { websocket: true }, (connection, req) => {
   const exotelSocket = connection.socket;
   console.log("📞 Exotel connected");
 
-  const vapiSocket = new WebSocket(`wss://api.vapi.ai/ws`);
+  const vapiSocket = new WebSocket(
+    `wss://api.vapi.ai/assistant/${process.env.VAPI_ASSISTANT_ID}/connect`,
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.VAPI_API_KEY}`
+      }
+    }
+  );
 
   vapiSocket.on("open", () => {
     console.log("🤖 Connected to Vapi");
-    vapiSocket.send(JSON.stringify({
-      type: "start",
-      apiKey: VAPI_API_KEY,
-      assistantId: VAPI_ASSISTANT_ID
-    }));
   });
 
   vapiSocket.on("message", (data) => {
     try {
       const msg = JSON.parse(data);
-      if (msg.type === "start_ack") {
-        console.log("✅ Vapi ready");
-      } else if (msg.type === "audio") {
+      if (msg.audio) {
         const audioBuffer = Buffer.from(msg.audio, "base64");
         const ulawBuffer = pcm16ToUlaw(audioBuffer);
         exotelSocket.send(ulawBuffer);
       } else {
-        console.log("📨 Vapi message:", msg);
+        console.log("🧠 Vapi Message:", msg.type);
       }
     } catch (err) {
-      console.error("Invalid Vapi message", err);
+      console.error("⚠️ Invalid Vapi message", err);
     }
   });
 
   exotelSocket.on("message", (data) => {
     try {
-      const pcmBuffer = ulawToPcm16(data);
-      const base64 = pcmBuffer.toString("base64");
-      vapiSocket.send(JSON.stringify({ type: "audio", audio: base64 }));
+      const pcm16Buffer = ulawToPcm16(data);
+      const base64 = pcm16Buffer.toString("base64");
+      vapiSocket.send(JSON.stringify({
+        type: "user_audio_chunk",
+        audio: base64
+      }));
     } catch (err) {
-      console.error("❌ Error converting or sending audio", err);
+      console.error("❌ Error sending user audio", err);
     }
   });
 
   exotelSocket.on("close", () => {
-    console.log("📴 Exotel disconnected");
+    console.log("❌ Exotel disconnected");
     vapiSocket.close();
   });
 
   vapiSocket.on("close", () => {
-    console.log("📴 Vapi disconnected");
+    console.log("❌ Vapi disconnected");
     exotelSocket.close();
   });
 });
 
-fastify.listen({ port: 3000 }, () => {
-  console.log("🚀 WebSocket Proxy running at ws://localhost:3000/ws");
+// ✅ Start server on 0.0.0.0 and dynamic port (important for deployment)
+fastify.listen({ port: process.env.PORT || 3000, host: "0.0.0.0" }, () => {
+  console.log(`🚀 WebSocket Proxy running at ws://0.0.0.0:${process.env.PORT || 3000}/ws`);
 });
