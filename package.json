@@ -1,0 +1,14 @@
+{
+  "name": "exotel-vapi-bridge",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@fastify/websocket": "^9.0.0",
+    "dotenv": "^16.0.0",
+    "fastify": "^4.0.0",
+    "ws": "^8.0.0"
+  }
+}
